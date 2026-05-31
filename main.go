@@ -80,11 +80,49 @@ func handlerRegister(s *state, cmd command) error {
 	return nil
 }
 
+func handlerFeeds(s *state, cmd command) error {
+	feeds, err := s.db.GetFeeds(context.Background())
+	if err != nil {
+		return fmt.Errorf("error fetching feeds: %w", err)
+	}
+	for _, f := range feeds {
+		fmt.Printf("Name: %s\nURL:  %s\nUser: %s\n\n", f.Name, f.Url, f.UserName)
+	}
+	return nil
+}
+
 func handlerAgg(s *state, cmd command) error {
 	feed, err := fetchFeed(context.Background(), "https://www.wagslane.dev/index.xml")
 	if err != nil {
 		return fmt.Errorf("error fetching feed: %w", err)
 	}
+	fmt.Printf("%+v\n", feed)
+	return nil
+}
+
+func handlerAddFeed(s *state, cmd command) error {
+	if len(cmd.args) < 2 {
+		return fmt.Errorf("addfeed requires a name and a url")
+	}
+
+	user, err := s.db.GetUser(context.Background(), s.cfg.CurrentUserName)
+	if err != nil {
+		return fmt.Errorf("error getting current user: %w", err)
+	}
+
+	now := time.Now()
+	feed, err := s.db.CreateFeed(context.Background(), database.CreateFeedParams{
+		ID:        uuid.New(),
+		CreatedAt: now,
+		UpdatedAt: now,
+		Name:      cmd.args[0],
+		Url:       cmd.args[1],
+		UserID:    user.ID,
+	})
+	if err != nil {
+		return fmt.Errorf("error creating feed: %w", err)
+	}
+
 	fmt.Printf("%+v\n", feed)
 	return nil
 }
@@ -128,6 +166,8 @@ func main() {
 
 	cmds := commands{handlers: make(map[string]func(*state, command) error)}
 	cmds.register("agg", handlerAgg)
+	cmds.register("addfeed", handlerAddFeed)
+	cmds.register("feeds", handlerFeeds)
 	cmds.register("login", handlerLogin)
 	cmds.register("register", handlerRegister)
 	cmds.register("reset", handlerReset)
