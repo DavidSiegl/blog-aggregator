@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"strconv"
+	"strings"
 	"time"
 
 	"blog-aggregator/internal/config"
@@ -101,13 +103,104 @@ func handlerFeeds(s *state, cmd command) error {
 	return nil
 }
 
-func handlerAgg(s *state, cmd command) error {
-	feed, err := fetchFeed(context.Background(), "https://www.wagslane.dev/index.xml")
-	if err != nil {
-		return fmt.Errorf("error fetching feed: %w", err)
+var pubDateFormats = []string{
+	time.RFC1123Z,
+	time.RFC1123,
+	time.RFC3339,
+	"2006-01-02T15:04:05Z",
+	"Mon, 2 Jan 2006 15:04:05 -0700",
+	"Mon, 2 Jan 2006 15:04:05 MST",
+}
+
+func parsePubDate(s string) sql.NullTime {
+	for _, layout := range pubDateFormats {
+		if t, err := time.Parse(layout, s); err == nil {
+			return sql.NullTime{Time: t, Valid: true}
+		}
 	}
-	fmt.Printf("%+v\n", feed)
+	return sql.NullTime{}
+}
+
+func scrapeFeeds(s *state) error {
+	feed, err := s.db.GetNextFeedToFetch(context.Background())
+	if err != nil {
+		return fmt.Errorf("error getting next feed: %w", err)
+	}
+
+	if err := s.db.MarkFeedFetched(context.Background(), feed.ID); err != nil {
+		return fmt.Errorf("error marking feed fetched: %w", err)
+	}
+
+	rssFeed, err := fetchFeed(context.Background(), feed.Url)
+	if err != nil {
+		return fmt.Errorf("error fetching feed %s: %w", feed.Url, err)
+	}
+
+	fmt.Printf("--- %s ---\n", rssFeed.Channel.Title)
+	for _, item := range rssFeed.Channel.Item {
+		now := time.Now()
+		_, err := s.db.CreatePost(context.Background(), database.CreatePostParams{
+			ID:          uuid.New(),
+			CreatedAt:   now,
+			UpdatedAt:   now,
+			Title:       item.Title,
+			Url:         item.Link,
+			Description: sql.NullString{String: item.Description, Valid: item.Description != ""},
+			PublishedAt: parsePubDate(item.PubDate),
+			FeedID:      feed.ID,
+		})
+		if err != nil {
+			if strings.Contains(err.Error(), "unique constraint") {
+				continue
+			}
+			log.Printf("error saving post %q: %v", item.Title, err)
+		}
+	}
 	return nil
+}
+
+func handlerBrowse(s *state, cmd command, user database.User) error {
+	limit := int32(2)
+	if len(cmd.args) > 0 {
+		n, err := strconv.Atoi(cmd.args[0])
+		if err != nil {
+			return fmt.Errorf("invalid limit %q: %w", cmd.args[0], err)
+		}
+		limit = int32(n)
+	}
+
+	posts, err := s.db.GetPostsForUser(context.Background(), database.GetPostsForUserParams{
+		UserID: user.ID,
+		Limit:  limit,
+	})
+	if err != nil {
+		return fmt.Errorf("error fetching posts: %w", err)
+	}
+
+	for _, p := range posts {
+		fmt.Printf("Title: %s\nURL:   %s\n\n", p.Title, p.Url)
+	}
+	return nil
+}
+
+func handlerAgg(s *state, cmd command) error {
+	if len(cmd.args) == 0 {
+		return fmt.Errorf("agg requires a time_between_reqs argument (e.g. 1s, 1m, 1h)")
+	}
+
+	timeBetweenReqs, err := time.ParseDuration(cmd.args[0])
+	if err != nil {
+		return fmt.Errorf("invalid duration %q: %w", cmd.args[0], err)
+	}
+
+	fmt.Printf("Collecting feeds every %s\n", timeBetweenReqs)
+
+	ticker := time.NewTicker(timeBetweenReqs)
+	for ; ; <-ticker.C {
+		if err := scrapeFeeds(s); err != nil {
+			log.Printf("scrape error: %v", err)
+		}
+	}
 }
 
 func handlerAddFeed(s *state, cmd command, user database.User) error {
@@ -238,6 +331,7 @@ func main() {
 
 	cmds := commands{handlers: make(map[string]func(*state, command) error)}
 	cmds.register("agg", handlerAgg)
+	cmds.register("browse", middlewareLoggedIn(handlerBrowse))
 	cmds.register("follow", middlewareLoggedIn(handlerFollow))
 	cmds.register("unfollow", middlewareLoggedIn(handlerUnfollow))
 	cmds.register("following", middlewareLoggedIn(handlerFollowing))

@@ -61,7 +61,8 @@ Or run directly with `go run . <command>`.
 
 | Command | Arguments | Description |
 |---|---|---|
-| `agg` | | Fetch and display the latest posts |
+| `agg` | `<interval>` | Continuously fetch posts from all followed feeds at the given interval (e.g. `30s`, `1m`, `1h`) |
+| `browse` | `[limit]` | Print the most recent posts for the current user (default: 2) |
 
 ## Example usage
 
@@ -80,4 +81,10 @@ go run . following
 
 # Unfollow a feed
 go run . unfollow "https://hnrss.org/newest"
+
+# Start the aggregator (fetches posts every 30 seconds)
+go run . agg 30s
+
+# Browse the 5 most recent posts
+go run . browse 5
 ```
